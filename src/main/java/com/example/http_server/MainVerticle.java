@@ -15,8 +15,8 @@ import java.util.HashMap;
 
 public class MainVerticle extends AbstractVerticle {
 
-  static HashMap<NetSocket, NetSocket> map1 = new HashMap<>();
-  static HashMap<NetSocket, NetSocket> map2 = new HashMap<>();
+  static HashMap<NetSocket, NetSocket> map_s_t = new HashMap<>();
+  static HashMap<NetSocket, NetSocket> map_t_s = new HashMap<>();
   static HashMap<URL, Buffer> map_url_buffer = new HashMap<>();
   static HashMap<URL, String> map_url_ETag = new HashMap<>();
 
@@ -26,13 +26,25 @@ public class MainVerticle extends AbstractVerticle {
     NetServer server = vertx.createNetServer();
 
     server.connectHandler(socket -> {
+      // 用户过滤
+//      userFilter(socket);
       socket.handler(buffer -> {
         String message = buffer.toString();
+        System.out.println(message);
         System.out.println("数据的长度是" + message.length());
-        try {
-          sendHttpRequest(vertx, message, socket);
-        } catch (MalformedURLException e) {
-          e.printStackTrace();
+        // 网站过滤
+        if (!webFilter(message, socket)) {
+          // 网站引导
+          if (webGuide(message)) {
+            message = Data.guideWebMsg;
+          }
+          {
+            try {
+              sendHttpRequest(vertx, message, socket);
+            } catch (MalformedURLException e) {
+              e.printStackTrace();
+            }
+          }
         }
       });
 
@@ -48,18 +60,54 @@ public class MainVerticle extends AbstractVerticle {
     });
   }
 
-  public static String parseHttpHeader(String reqMsg) {
-    String[] msg = reqMsg.split("\n");
-    int length = msg.length;
-    String[] info = msg[0].split(" ");
-    return info[1];
+  // 网站引导
+  public static boolean webGuide(String message) {
+    String url = parseHttpHeader(message);
+    for (int i = 0; i < Data.guideWeb.length; i++) {
+      if (url.equals(Data.guideWeb[i])) {
+        return true;
+      }
+    }
+    return false;
   }
 
+  // 网站过滤
+  public static boolean webFilter(String message, NetSocket socket) {
+    String url = parseHttpHeader(message);
+    String checkHttps = url.substring(0, 4);
+    if (!checkHttps.equals("http")) {
+      socket.write(Data.error_404);
+      return true;
+    }
+    return false;
+  }
+
+
+  // 用户过滤
+  public static void userFilter(NetSocket socket) {
+    if (socket.remoteAddress().host().equals("127.0.0.1")) {
+      socket.close();
+    }
+  }
+
+  // 解析头部url
+  public static String parseHttpHeader(String reqMsg) {
+    String[] msg = reqMsg.split("\n");
+    String[] info = msg[0].split(" ");
+    if (info[0].equals("CONNECT")) {
+      return info[1].split(":")[0];
+    } else {
+      return info[1];
+    }
+  }
+
+  // 读取头部的ETag与状态码
   public static ResHeader parseResHeader(Buffer buffer) {
     String resMsg = buffer.toString();
     String[] msg = resMsg.split("\n");
     String statusCode = "";
     String ETag = "";
+    int length = msg.length;
     if (!msg[0].split(" ")[0].equals("HTTP/1.1")) {
       return null;
     }
@@ -72,17 +120,21 @@ public class MainVerticle extends AbstractVerticle {
         break;
       }
       count++;
+      if (count >= length) {
+        break;
+      }
     }
     return new ResHeader(statusCode, ETag);
   }
 
+  // 在报文段头部添加ETag
   public static String addEtag(URL url, String message) {
-      String m = message.substring(0, message.length() - 2);
-      return m + "If-None-Match: " + map_url_ETag.get(url) + "\r\n";
+    String m = message.substring(0, message.length() - 2);
+    return m + "If-None-Match: " + map_url_ETag.get(url) + "\n" + "\r\n";
   }
 
-
-  public static void sendHttpRequest(Vertx vertx, String message, NetSocket clientSocket) throws MalformedURLException {
+  // 创建客户端发送报文
+  public static void sendHttpRequest(Vertx vertx, String message, NetSocket srv_clt_socket) throws MalformedURLException {
     NetClient client = vertx.createNetClient();
     String u = parseHttpHeader(message);
     URL url = new URL(u);
@@ -91,8 +143,8 @@ public class MainVerticle extends AbstractVerticle {
       if (res.succeeded()) {
         System.out.println("服务器已连接成功");
         NetSocket socket = res.result();
-        map1.put(clientSocket, socket);
-        map2.put(socket, clientSocket);
+        map_s_t.put(srv_clt_socket, socket);
+        map_t_s.put(socket, srv_clt_socket);
         String msg = message;
         if (map_url_ETag.get(url) != null) {
           msg = addEtag(url, message);
@@ -102,9 +154,9 @@ public class MainVerticle extends AbstractVerticle {
         socket.write(msg);
         System.out.println(msg);
 
-        NetSocket client_socket = map2.get(socket);
         socket.handler(buffer -> {
           // 获得响应头的状态码和ETag
+          NetSocket client_socket = map_t_s.get(socket);
           ResHeader resHeader = parseResHeader(buffer);
           if (resHeader != null) {
             // 进行缓存
